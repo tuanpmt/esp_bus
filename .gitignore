@@ -1,0 +1,22 @@
+# Build directories
+build/
+sdkconfig
+sdkconfig.old
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Examples build
+examples/*/build/
+examples/*/sdkconfig
+examples/*/sdkconfig.old
+
+*.lock

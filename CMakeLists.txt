@@ -1,0 +1,16 @@
+idf_component_register(
+    SRCS 
+        "src/esp_bus.c"
+        "src/esp_bus_msg.c"
+        "src/esp_bus_svc.c"
+        "src/esp_bus_btn.c"
+        "src/esp_bus_led.c"
+    INCLUDE_DIRS 
+        "include"
+    PRIV_INCLUDE_DIRS
+        "src"
+    REQUIRES 
+        freertos
+        driver
+        esp_timer
+)

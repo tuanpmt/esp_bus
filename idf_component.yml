@@ -1,0 +1,36 @@
+# ESP Bus Component Manifest
+
+version: "1.0.0"
+description: "Lightweight event-driven message bus for ESP-IDF with string-based routing, pattern matching, and zero-allocation design"
+
+url: "https://github.com/tuanpmt/esp_bus"
+repository: "https://github.com/tuanpmt/esp_bus.git"
+
+maintainers:
+  - "Tuan PM <tuanpm@live.com>"
+
+license: "MIT"
+
+targets:
+  - esp32
+  - esp32s2
+  - esp32s3
+  - esp32c2
+  - esp32c3
+  - esp32c6
+  - esp32h2
+
+dependencies:
+  idf:
+    version: ">=5.0"
+
+issues_url: "https://github.com/tuanpmt/esp_bus/issues"
+discussion_url: "https://github.com/tuanpmt/esp_bus/discussions"
+
+files:
+  exclude:
+    - "test/"
+    - "build/"
+    - ".git/"
+    - "*.swp"
+    - ".DS_Store"

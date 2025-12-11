@@ -1,0 +1,102 @@
+menu "ESP Bus Configuration"
+
+    config ESP_BUS_TASK_STACK_SIZE
+        int "ESP Bus task stack size"
+        default 4096
+        range 2048 8192
+        help
+            Stack size for the ESP Bus task in bytes.
+            Increase if you have complex handlers that use significant stack.
+
+    config ESP_BUS_QUEUE_SIZE
+        int "ESP Bus message queue size"
+        default 16
+        range 8 64
+        help
+            Maximum number of pending messages in the queue.
+            Increase if you have high message throughput.
+
+    config ESP_BUS_TASK_PRIORITY
+        int "ESP Bus task priority"
+        default 5
+        range 1 25
+        help
+            FreeRTOS priority for the ESP Bus task.
+            Higher priority means faster message processing.
+
+    config ESP_BUS_NAME_MAX_LEN
+        int "Maximum module name length"
+        default 16
+        range 8 32
+        help
+            Maximum length of module names (e.g., "btn1", "led1").
+
+    config ESP_BUS_PATTERN_MAX_LEN
+        int "Maximum pattern length"
+        default 32
+        range 16 64
+        help
+            Maximum length of patterns (e.g., "btn1:pressed", "led1.blink").
+
+    config ESP_BUS_DEFAULT_LOG_LEVEL
+        int "Default log level"
+        default 3
+        range 0 5
+        help
+            Default log level for ESP Bus.
+            0=None, 1=Error, 2=Warn, 3=Info, 4=Debug, 5=Verbose
+
+    config ESP_BUS_BTN_ENABLE
+        bool "Enable Button module"
+        default y
+        help
+            Enable the built-in button module (esp_bus_btn).
+
+    config ESP_BUS_BTN_DEFAULT_DEBOUNCE_MS
+        int "Button default debounce time (ms)"
+        default 20
+        range 5 100
+        depends on ESP_BUS_BTN_ENABLE
+        help
+            Default debounce time for buttons in milliseconds.
+
+    config ESP_BUS_BTN_DEFAULT_LONG_PRESS_MS
+        int "Button default long press time (ms)"
+        default 1000
+        range 200 5000
+        depends on ESP_BUS_BTN_ENABLE
+        help
+            Default time threshold for long press detection.
+
+    config ESP_BUS_BTN_DEFAULT_DOUBLE_PRESS_MS
+        int "Button default double press window (ms)"
+        default 300
+        range 100 1000
+        depends on ESP_BUS_BTN_ENABLE
+        help
+            Maximum time between presses to detect double press.
+
+    config ESP_BUS_LED_ENABLE
+        bool "Enable LED module"
+        default y
+        help
+            Enable the built-in LED module (esp_bus_led).
+
+    config ESP_BUS_LED_DEFAULT_BLINK_ON_MS
+        int "LED default blink ON time (ms)"
+        default 200
+        range 10 5000
+        depends on ESP_BUS_LED_ENABLE
+        help
+            Default ON time for LED blink in milliseconds.
+
+    config ESP_BUS_LED_DEFAULT_BLINK_OFF_MS
+        int "LED default blink OFF time (ms)"
+        default 200
+        range 10 5000
+        depends on ESP_BUS_LED_ENABLE
+        help
+            Default OFF time for LED blink in milliseconds.
+
+endmenu
+
