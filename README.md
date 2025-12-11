@@ -408,6 +408,25 @@ err = esp_bus_req("sensor.read", NULL, 0, buf, 2, &len, 100);
 // err == ESP_ERR_INVALID_SIZE, len contains required size
 ```
 
+## Testing
+
+Run unit tests:
+
+```bash
+cd esp_bus/test
+idf.py set-target esp32s3
+idf.py build flash monitor
+```
+
+Or with pytest-embedded:
+
+```bash
+pip install pytest-embedded pytest-embedded-serial-esp pytest-embedded-idf
+pytest --target esp32s3 -v
+```
+
+See [test/README.md](test/README.md) for more details.
+
 ## Configuration
 
 Use `idf.py menuconfig` to configure:

@@ -20,3 +20,6 @@ examples/*/sdkconfig
 examples/*/sdkconfig.old
 
 *.lock
+dist
+__pycache__
+.pytest_cache
