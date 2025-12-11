@@ -14,24 +14,63 @@ Lightweight event-driven message bus for ESP-IDF with string-based routing, patt
 
 ## Architecture
 
+```mermaid
+graph TB
+    subgraph ESP_BUS_TASK["ESP Bus Task"]
+        Router["Message Router<br/>• req/res<br/>• events<br/>• routing"]
+        Service["Service Loop<br/>• tick callbacks<br/>• timers"]
+    end
+    
+    subgraph Modules["Modules (no task)"]
+        BTN["Button Module"]
+        LED["LED Module"]
+        Custom["Custom Module"]
+    end
+    
+    BTN -->|register + tick| ESP_BUS_TASK
+    LED -->|register + tick| ESP_BUS_TASK
+    Custom -->|register + tick| ESP_BUS_TASK
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                        ESP_BUS TASK                          │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │  Message Router    │  Service Loop                     │  │
-│  │  ──────────────    │  ────────────                     │  │
-│  │  • req/res         │  • tick callbacks (every loop)    │  │
-│  │  • events          │  • timers (one-shot/repeat)       │  │
-│  │  • routing         │                                   │  │
-│  └────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
-         ▲                              ▲
-         │ register + tick              │ register + tick
-    ┌────┴────┐                    ┌────┴────┐
-    │ Button  │                    │   LED   │
-    │ Module  │                    │ Module  │
-    └─────────┘                    └─────────┘
-    (no task)                      (no task)
+
+## Message Flow
+
+```mermaid
+sequenceDiagram
+    participant App
+    participant Bus as ESP Bus
+    participant BTN as Button
+    participant LED as LED
+
+    App->>Bus: esp_bus_on("btn1:short_press", "led1.toggle")
+    
+    Note over BTN: User presses button
+    BTN->>Bus: emit("btn1", "short_press")
+    Bus->>Bus: Route: btn1:short_press → led1.toggle
+    Bus->>LED: request("toggle")
+    LED->>LED: Toggle LED state
+```
+
+## Button Events Flow
+
+```mermaid
+flowchart LR
+    subgraph Press["Button Down"]
+        SP["short_press"]
+        DP["double_press<br/>(if within 300ms)"]
+    end
+    
+    subgraph Hold["Hold >= 1s"]
+        LP["long_press"]
+    end
+    
+    subgraph Release["Button Up"]
+        SR["short_release<br/>(if no long_press)"]
+        LR["long_release<br/>(if long_press fired)"]
+    end
+    
+    Press --> Hold
+    Press --> Release
+    Hold --> Release
 ```
 
 ## Installation
@@ -62,8 +101,8 @@ void app_main(void) {
         .pin = GPIO_NUM_2,
     });
     
-    // Connect: button press → LED toggle
-    esp_bus_on(BTN_ON_PRESSED("btn1"), LED_CMD_TOGGLE("led1"), NULL, 0);
+    // Connect: short press → LED toggle
+    esp_bus_on(BTN_ON_SHORT("btn1"), LED_CMD_TOGGLE("led1"), NULL, 0);
     
     // Connect: long press → LED blink 3 times
     esp_bus_on(BTN_ON_LONG("btn1"), LED_CMD_BLINK("led1"), "100,100,3", 10);
@@ -79,8 +118,8 @@ void app_main(void) {
 Wildcards:
   <module>.*         - All actions
   <module>:*         - All events
-  *:pressed          - Match all pressed events
-  btn*:pressed       - Match btn1, btn2, btnX...
+  *:short_press      - Match all short_press events
+  btn*:short_press   - Match btn1, btn2, btnX...
 ```
 
 ## Core API
@@ -142,6 +181,12 @@ void esp_bus_unsub(int id);
 
 ### Routing API (Zero-Code Connections)
 
+```mermaid
+graph LR
+    E["btn1:short_press"] -->|esp_bus_on| R["led1.toggle"]
+    E2["btn1:long_press"] -->|esp_bus_on| R2["led1.blink"]
+```
+
 ```c
 // Connect event to request
 esp_err_t esp_bus_on(
@@ -194,24 +239,23 @@ typedef struct {
 
 ### Events
 
-| Event | Data | Description |
+| Event | When | Description |
 |-------|------|-------------|
-| `pressed` | - | Button pressed down |
-| `released` | int64_t duration_ms | Button released |
-| `short_press` | - | Short press detected |
-| `long_press` | - | Long press detected (while held) |
-| `short_release` | - | Released after short press |
-| `long_release` | - | Released after long press |
-| `double_press` | - | Double press detected |
+| `short_press` | Immediately on press | Button pressed down |
+| `long_press` | Hold >= long_press_ms | Long press detected |
+| `short_release` | Release before long_press | Released after short press |
+| `long_release` | Release after long_press | Released after long press |
+| `double_press` | Double click | Two presses within double_press_ms |
 
 ### Pattern Macros
 
 ```c
-BTN_ON_PRESSED("btn1")   // "btn1:pressed"
-BTN_ON_LONG("btn1")      // "btn1:long_press"
-BTN_ON_SHORT("btn1")     // "btn1:short_press"
-BTN_ON_DOUBLE("btn1")    // "btn1:double_press"
-BTN_STATE("btn1")        // "btn1.get_state"
+BTN_ON_SHORT("btn1")      // "btn1:short_press"
+BTN_ON_LONG("btn1")       // "btn1:long_press"
+BTN_ON_SHORT_REL("btn1")  // "btn1:short_release"
+BTN_ON_LONG_REL("btn1")   // "btn1:long_release"
+BTN_ON_DOUBLE("btn1")     // "btn1:double_press"
+BTN_STATE("btn1")         // "btn1.get_state"
 ```
 
 ## LED Module
@@ -270,8 +314,9 @@ void app_main(void) {
     esp_bus_btn_reg("btn1", &(esp_bus_btn_cfg_t){ .pin = GPIO_NUM_0, .active_low = true });
     esp_bus_led_reg("led1", &(esp_bus_led_cfg_t){ .pin = GPIO_NUM_2 });
     
-    // Press → toggle, long press → on, release → off
-    esp_bus_on(BTN_ON_PRESSED("btn1"), LED_CMD_TOGGLE("led1"), NULL, 0);
+    // Short press → toggle, long press → blink
+    esp_bus_on(BTN_ON_SHORT("btn1"), LED_CMD_TOGGLE("led1"), NULL, 0);
+    esp_bus_on(BTN_ON_LONG("btn1"), LED_CMD_BLINK("led1"), "100,100,3", 10);
 }
 ```
 
@@ -281,10 +326,10 @@ void app_main(void) {
 void on_any_button(const char *evt, const void *data, size_t len, void *ctx) {
     ESP_LOGI("APP", "Button event: %s", evt);
     
-    if (strcmp(evt, "pressed") == 0) {
-        esp_bus_call(LED_CMD_ON("led1"));
-    } else if (strcmp(evt, "released") == 0) {
-        esp_bus_call(LED_CMD_OFF("led1"));
+    if (strcmp(evt, "short_press") == 0) {
+        esp_bus_call(LED_CMD_TOGGLE("led1"));
+    } else if (strcmp(evt, "long_press") == 0) {
+        esp_bus_call_s(LED_CMD_BLINK("led1"), "100,100,-1");
     }
 }
 
