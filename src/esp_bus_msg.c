@@ -10,13 +10,75 @@
 static const char *TAG = "esp_bus";
 
 // ============================================================================
+// Local retain/release for subs and routes
+// ============================================================================
+static sub_node_t *retain_sub_locked(sub_node_t *node) {
+    if (!node || node->pending_delete) return NULL;
+    node->refcnt++;
+    return node;
+}
+
+static void release_sub(sub_node_t *node) {
+    if (!node) return;
+    xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
+    if (node->refcnt > 0) node->refcnt--;
+    if (node->pending_delete && node->refcnt == 0) {
+        sub_node_t *prev = NULL;
+        sub_node_t *cur;
+        SLIST_FOREACH(cur, &g_bus.subs, next) {
+            if (cur == node) break;
+            prev = cur;
+        }
+        if (cur) {
+            if (prev) {
+                SLIST_REMOVE_AFTER(prev, next);
+            } else {
+                SLIST_REMOVE_HEAD(&g_bus.subs, next);
+            }
+            free(cur);
+        }
+    }
+    xSemaphoreGive(g_bus.mutex);
+}
+
+static route_node_t *retain_route_locked(route_node_t *node) {
+    if (!node || node->pending_delete) return NULL;
+    node->refcnt++;
+    return node;
+}
+
+static void release_route(route_node_t *node) {
+    if (!node) return;
+    xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
+    if (node->refcnt > 0) node->refcnt--;
+    if (node->pending_delete && node->refcnt == 0) {
+        route_node_t *prev = NULL;
+        route_node_t *cur;
+        SLIST_FOREACH(cur, &g_bus.routes, next) {
+            if (cur == node) break;
+            prev = cur;
+        }
+        if (cur) {
+            if (prev) {
+                SLIST_REMOVE_AFTER(prev, next);
+            } else {
+                SLIST_REMOVE_HEAD(&g_bus.routes, next);
+            }
+            if (cur->req_data) free(cur->req_data);
+            free(cur);
+        }
+    }
+    xSemaphoreGive(g_bus.mutex);
+}
+
+// ============================================================================
 // Request Processing
 // ============================================================================
 
 esp_err_t esp_bus_process_request(const char *pattern, const void *req, size_t req_len,
                                    void *res, size_t res_size, size_t *res_len) {
     char module_name[ESP_BUS_NAME_MAX];
-    char action[ESP_BUS_NAME_MAX];
+    char action[ESP_BUS_PATTERN_MAX];
     char sep;
     
     if (!esp_bus_parse_pattern(pattern, module_name, action, &sep) || sep != '.') {
@@ -24,7 +86,7 @@ esp_err_t esp_bus_process_request(const char *pattern, const void *req, size_t r
         return ESP_ERR_INVALID_ARG;
     }
     
-    module_node_t *mod = esp_bus_find_module(module_name);
+    module_node_t *mod = esp_bus_acquire_module(module_name);
     if (!mod) {
         if (g_bus.strict) {
             esp_bus_report_error(pattern, ESP_ERR_NOT_FOUND, "module not found");
@@ -34,12 +96,15 @@ esp_err_t esp_bus_process_request(const char *pattern, const void *req, size_t r
     }
     
     if (!mod->on_req) {
+        esp_bus_release_module(mod);
         esp_bus_report_error(pattern, ESP_ERR_NOT_SUPPORTED, "no handler");
         return ESP_ERR_NOT_SUPPORTED;
     }
     
     ESP_LOGD(TAG, "REQ %s", pattern);
-    return mod->on_req(action, req, req_len, res, res_size, res_len, mod->ctx);
+    esp_err_t ret = mod->on_req(action, req, req_len, res, res_size, res_len, mod->ctx);
+    esp_bus_release_module(mod);
+    return ret;
 }
 
 // ============================================================================
@@ -52,19 +117,62 @@ void esp_bus_dispatch_event(const char *src, const char *evt, const void *data, 
     
     ESP_LOGD(TAG, "EVT %s", full);
     
-    // Dispatch to subscribers
+    // Collect subscribers and routes safely
+    sub_node_t **subs = NULL;
+    size_t subs_cnt = 0, subs_cap = 0;
+    route_node_t **routes = NULL;
+    size_t routes_cnt = 0, routes_cap = 0;
+    bool oom = false;
+    
+    xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
     sub_node_t *sub;
     SLIST_FOREACH(sub, &g_bus.subs, next) {
+        if (sub->pending_delete) continue;
         if (esp_bus_match_pattern(sub->pattern, full)) {
-            sub->handler(evt, data, len, sub->ctx);
+            if (subs_cnt == subs_cap) {
+                subs_cap = subs_cap ? subs_cap * 2 : 4;
+                void *tmp_mem = realloc(subs, subs_cap * sizeof(*subs));
+                if (!tmp_mem) { oom = true; break; }
+                subs = tmp_mem;
+            }
+            subs[subs_cnt++] = retain_sub_locked(sub);
+        }
+    }
+    
+    route_node_t *r;
+    if (!oom) {
+        SLIST_FOREACH(r, &g_bus.routes, next) {
+            if (r->pending_delete) continue;
+            if (!esp_bus_match_pattern(r->evt_pattern, full)) continue;
+            if (routes_cnt == routes_cap) {
+                routes_cap = routes_cap ? routes_cap * 2 : 4;
+                void *tmp_mem = realloc(routes, routes_cap * sizeof(*routes));
+                if (!tmp_mem) { oom = true; break; }
+                routes = tmp_mem;
+            }
+            routes[routes_cnt++] = retain_route_locked(r);
+        }
+    }
+    xSemaphoreGive(g_bus.mutex);
+    if (oom) {
+        free(subs);
+        free(routes);
+        ESP_LOGE(TAG, "EVT %s: OOM during dispatch", full);
+        return;
+    }
+    
+    // Dispatch to subscribers
+    for (size_t i = 0; i < subs_cnt; i++) {
+        if (subs[i]) {
+            subs[i]->handler(evt, data, len, subs[i]->ctx);
+            release_sub(subs[i]);
         }
     }
     
     // Process routes
-    route_node_t *r;
-    SLIST_FOREACH(r, &g_bus.routes, next) {
-        if (!esp_bus_match_pattern(r->evt_pattern, full)) continue;
-        
+    for (size_t i = 0; i < routes_cnt; i++) {
+        r = routes[i];
+        if (!r) continue;
         if (r->transform) {
             const char *out_req = NULL;
             void *out_data = NULL;
@@ -78,7 +186,11 @@ void esp_bus_dispatch_event(const char *src, const char *evt, const void *data, 
             ESP_LOGD(TAG, "ROUTE %s -> %s", full, r->req_pattern);
             esp_bus_process_request(r->req_pattern, r->req_data, r->req_len, NULL, 0, NULL);
         }
+        release_route(r);
     }
+    
+    free(subs);
+    free(routes);
 }
 
 // ============================================================================
@@ -89,6 +201,7 @@ esp_err_t esp_bus_req(const char *pattern, const void *req, size_t req_len,
                        void *res, size_t res_size, size_t *res_len,
                        uint32_t timeout_ms) {
     if (!g_bus.initialized || !pattern) return ESP_ERR_INVALID_ARG;
+    if (timeout_ms == ESP_BUS_NO_WAIT && res) return ESP_ERR_INVALID_ARG;
     
     // If called from bus_task context (e.g. from service callback), 
     // process directly to avoid deadlock
@@ -115,20 +228,24 @@ esp_err_t esp_bus_req(const char *pattern, const void *req, size_t req_len,
     esp_err_t result = ESP_OK;
     SemaphoreHandle_t done = NULL;
     
+    TickType_t start = xTaskGetTickCount();
+    TickType_t queue_ticks = pdMS_TO_TICKS(timeout_ms);
     if (timeout_ms > 0) {
         done = xSemaphoreCreateBinary();
         msg.done = done;
         msg.result = &result;
     }
     
-    if (xQueueSend(g_bus.queue, &msg, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+    if (xQueueSend(g_bus.queue, &msg, queue_ticks) != pdTRUE) {
         if (msg.data) free(msg.data);
         if (done) vSemaphoreDelete(done);
         return ESP_ERR_TIMEOUT;
     }
     
     if (done) {
-        if (xSemaphoreTake(done, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        TickType_t elapsed = xTaskGetTickCount() - start;
+        TickType_t remain = (queue_ticks > elapsed) ? (queue_ticks - elapsed) : 0;
+        if (xSemaphoreTake(done, remain) != pdTRUE) {
             result = ESP_ERR_TIMEOUT;
         }
         vSemaphoreDelete(done);
@@ -177,6 +294,8 @@ int esp_bus_sub(const char *pattern, esp_bus_evt_fn handler, void *ctx) {
     strncpy(node->pattern, pattern, ESP_BUS_PATTERN_MAX - 1);
     node->handler = handler;
     node->ctx = ctx;
+    node->refcnt = 0;
+    node->pending_delete = false;
     
     SLIST_INSERT_HEAD(&g_bus.subs, node, next);
     xSemaphoreGive(g_bus.mutex);
@@ -191,12 +310,22 @@ void esp_bus_unsub(int id) {
     xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
     
     sub_node_t *node;
+    sub_node_t *prev = NULL;
     SLIST_FOREACH(node, &g_bus.subs, next) {
         if (node->id == id) {
-            SLIST_REMOVE(&g_bus.subs, node, sub_node, next);
-            free(node);
+            if (node->refcnt == 0) {
+                if (prev) {
+                    SLIST_REMOVE_AFTER(prev, next);
+                } else {
+                    SLIST_REMOVE_HEAD(&g_bus.subs, next);
+                }
+                free(node);
+            } else {
+                node->pending_delete = true;
+            }
             break;
         }
+        prev = node;
     }
     
     xSemaphoreGive(g_bus.mutex);
@@ -228,6 +357,8 @@ esp_err_t esp_bus_on(const char *evt_pattern, const char *req_pattern,
             node->req_len = req_len;
         }
     }
+    node->refcnt = 0;
+    node->pending_delete = false;
     
     SLIST_INSERT_HEAD(&g_bus.routes, node, next);
     xSemaphoreGive(g_bus.mutex);
@@ -250,6 +381,8 @@ esp_err_t esp_bus_on_fn(const char *evt_pattern, esp_bus_transform_fn fn, void *
     strncpy(node->evt_pattern, evt_pattern, ESP_BUS_PATTERN_MAX - 1);
     node->transform = fn;
     node->ctx = ctx;
+    node->refcnt = 0;
+    node->pending_delete = false;
     
     SLIST_INSERT_HEAD(&g_bus.routes, node, next);
     xSemaphoreGive(g_bus.mutex);
@@ -266,9 +399,13 @@ esp_err_t esp_bus_off(const char *evt_pattern, const char *req_pattern) {
     SLIST_FOREACH_SAFE(r, &g_bus.routes, next, tmp) {
         if (strcmp(r->evt_pattern, evt_pattern) == 0) {
             if (!req_pattern || strcmp(r->req_pattern, req_pattern) == 0) {
-                SLIST_REMOVE(&g_bus.routes, r, route_node, next);
-                if (r->req_data) free(r->req_data);
-                free(r);
+                if (r->refcnt == 0) {
+                    SLIST_REMOVE(&g_bus.routes, r, route_node, next);
+                    if (r->req_data) free(r->req_data);
+                    free(r);
+                } else {
+                    r->pending_delete = true;
+                }
             }
         }
     }

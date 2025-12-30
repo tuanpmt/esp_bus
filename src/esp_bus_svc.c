@@ -6,6 +6,8 @@
 #include "esp_bus_priv.h"
 #include <stdlib.h>
 
+static void release_service(svc_node_t *node);
+
 // ============================================================================
 // Service Processing
 // ============================================================================
@@ -16,6 +18,7 @@ uint32_t esp_bus_calc_next_wait(void) {
     
     svc_node_t *s;
     SLIST_FOREACH(s, &g_bus.services, next) {
+        if (s->pending_delete || s->next_run_us <= 0) continue;
         if (s->next_run_us > 0) {
             int64_t wait = s->next_run_us - now;
             if (wait < 1000) wait = 1000; // Min 1ms to avoid WDT
@@ -30,12 +33,23 @@ uint32_t esp_bus_calc_next_wait(void) {
 void esp_bus_run_services(void) {
     int64_t now = esp_bus_now_us();
     
-    svc_node_t *s, *tmp;
-    SLIST_FOREACH_SAFE(s, &g_bus.services, next, tmp) {
-        if (s->next_run_us <= 0) continue;
-        
+    svc_node_t **run_list = NULL;
+    size_t run_cnt = 0, run_cap = 0;
+    bool oom = false;
+    
+    xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
+    svc_node_t *s;
+    SLIST_FOREACH(s, &g_bus.services, next) {
+        if (s->pending_delete || s->next_run_us <= 0) continue;
         if (now >= s->next_run_us) {
-            s->fn(s->ctx);
+            if (run_cnt == run_cap) {
+                run_cap = run_cap ? run_cap * 2 : 4;
+                void *tmp_mem = realloc(run_list, run_cap * sizeof(*run_list));
+                if (!tmp_mem) { oom = true; break; }
+                run_list = tmp_mem;
+            }
+            s->refcnt++;
+            run_list[run_cnt++] = s;
             
             if (s->repeat) {
                 s->next_run_us = now + (int64_t)s->interval_ms * 1000;
@@ -45,13 +59,29 @@ void esp_bus_run_services(void) {
         }
     }
     
-    // Clean up expired one-shot timers
+    // Clean up nodes that are done and not referenced
+    svc_node_t *tmp;
     SLIST_FOREACH_SAFE(s, &g_bus.services, next, tmp) {
-        if (!s->repeat && s->next_run_us == 0) {
+        if ((s->pending_delete && s->refcnt == 0) ||
+            (!s->repeat && s->next_run_us == 0 && s->refcnt == 0)) {
             SLIST_REMOVE(&g_bus.services, s, svc_node, next);
             free(s);
         }
     }
+    xSemaphoreGive(g_bus.mutex);
+    if (oom) {
+        free(run_list);
+        return;
+    }
+    
+    for (size_t i = 0; i < run_cnt; i++) {
+        svc_node_t *node = run_list[i];
+        if (!node) continue;
+        node->fn(node->ctx);
+        release_service(node);
+    }
+    
+    free(run_list);
 }
 
 // ============================================================================
@@ -75,6 +105,8 @@ static int add_service(esp_bus_svc_fn fn, uint32_t interval_ms, void *ctx, bool 
     node->interval_ms = interval_ms;
     node->next_run_us = esp_bus_now_us() + (int64_t)interval_ms * 1000;
     node->repeat = repeat;
+    node->refcnt = 0;
+    node->pending_delete = false;
     
     SLIST_INSERT_HEAD(&g_bus.services, node, next);
     xSemaphoreGive(g_bus.mutex);
@@ -89,12 +121,23 @@ static void remove_service(int id) {
     xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
     
     svc_node_t *node;
+    svc_node_t *prev = NULL;
     SLIST_FOREACH(node, &g_bus.services, next) {
         if (node->id == id) {
-            SLIST_REMOVE(&g_bus.services, node, svc_node, next);
-            free(node);
+            if (node->refcnt == 0) {
+                if (prev) {
+                    SLIST_REMOVE_AFTER(prev, next);
+                } else {
+                    SLIST_REMOVE_HEAD(&g_bus.services, next);
+                }
+                free(node);
+            } else {
+                node->pending_delete = true;
+                node->next_run_us = 0;
+            }
             break;
         }
+        prev = node;
     }
     
     xSemaphoreGive(g_bus.mutex);
@@ -122,6 +165,33 @@ int esp_bus_every(esp_bus_svc_fn fn, uint32_t interval_ms, void *ctx) {
 
 void esp_bus_cancel(int id) {
     remove_service(id);
+}
+
+// ============================================================================
+// Refcount release
+// ============================================================================
+
+static void release_service(svc_node_t *node) {
+    if (!node) return;
+    xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
+    if (node->refcnt > 0) node->refcnt--;
+    if ((node->pending_delete || (!node->repeat && node->next_run_us == 0)) && node->refcnt == 0) {
+        svc_node_t *prev = NULL;
+        svc_node_t *cur;
+        SLIST_FOREACH(cur, &g_bus.services, next) {
+            if (cur == node) break;
+            prev = cur;
+        }
+        if (cur) {
+            if (prev) {
+                SLIST_REMOVE_AFTER(prev, next);
+            } else {
+                SLIST_REMOVE_HEAD(&g_bus.services, next);
+            }
+            free(cur);
+        }
+    }
+    xSemaphoreGive(g_bus.mutex);
 }
 
 void esp_bus_trigger(void) {

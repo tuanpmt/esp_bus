@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2025-DEC-31
+
+### Fixed
+
+- **Thread Safety**: Add reference counting for modules, subscriptions, routes, and services
+- **Use-after-free**: Fix crash when unregistering module/subscriber during event dispatch
+- **Memory Leak**: Fix context memory leak in button and LED module cleanup
+- **Buffer Overflow**: Fix action buffer size using ESP_BUS_PATTERN_MAX instead of ESP_BUS_NAME_MAX
+- **Request Timeout**: Fix timeout calculation to respect total timeout across queue and response wait
+- **Pattern Matching**: Implement `?` wildcard (single character match)
+
+### Changed
+
+- Refactor event dispatch to collect matching handlers before invoking (safer iteration)
+- Add `pending_delete` flag for deferred cleanup of in-use nodes
+
 ## [1.0.1] - 2025-DEC-12
 
 ### Added

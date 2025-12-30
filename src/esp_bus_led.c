@@ -4,6 +4,7 @@
  */
 
 #include "esp_bus_led.h"
+#include "esp_bus_priv.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -232,8 +233,21 @@ esp_err_t esp_bus_led_reg(const char *name, const esp_bus_led_cfg_t *cfg) {
 }
 
 esp_err_t esp_bus_led_unreg(const char *name) {
-    // Note: This is a simplified version
-    // Full implementation would need to track and free context
-    return esp_bus_unreg(name);
+    if (!name) return ESP_ERR_INVALID_ARG;
+    module_node_t *mod = esp_bus_acquire_module(name);
+    if (!mod) return ESP_ERR_NOT_FOUND;
+    led_ctx_t *ctx = (led_ctx_t *)mod->ctx;
+    int timer_id = ctx ? ctx->timer_id : -1;
+    esp_bus_release_module(mod);
+    
+    if (timer_id >= 0) {
+        esp_bus_cancel(timer_id);
+    }
+    
+    esp_err_t err = esp_bus_unreg(name);
+    if (ctx) {
+        free(ctx);
+    }
+    return err;
 }
 

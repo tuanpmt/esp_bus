@@ -19,6 +19,8 @@ typedef struct module_node {
     esp_bus_req_fn on_req;
     esp_bus_evt_fn on_evt;
     void *ctx;
+    uint16_t refcnt;
+    bool pending_delete;
     const esp_bus_action_t *actions;
     size_t action_cnt;
     const esp_bus_event_t *events;
@@ -31,6 +33,8 @@ typedef struct sub_node {
     char pattern[ESP_BUS_PATTERN_MAX];
     esp_bus_evt_fn handler;
     void *ctx;
+    uint16_t refcnt;
+    bool pending_delete;
     SLIST_ENTRY(sub_node) next;
 } sub_node_t;
 
@@ -41,6 +45,8 @@ typedef struct route_node {
     size_t req_len;
     esp_bus_transform_fn transform;
     void *ctx;
+    uint16_t refcnt;
+    bool pending_delete;
     SLIST_ENTRY(route_node) next;
 } route_node_t;
 
@@ -51,6 +57,8 @@ typedef struct svc_node {
     uint32_t interval_ms;
     int64_t next_run_us;
     bool repeat;
+    uint16_t refcnt;
+    bool pending_delete;
     SLIST_ENTRY(svc_node) next;
 } svc_node_t;
 
@@ -111,7 +119,8 @@ extern esp_bus_state_t g_bus;
 int64_t esp_bus_now_us(void);
 bool esp_bus_match_pattern(const char *pattern, const char *target);
 bool esp_bus_parse_pattern(const char *pattern, char *module, char *action, char *sep);
-module_node_t *esp_bus_find_module(const char *name);
+module_node_t *esp_bus_acquire_module(const char *name);
+void esp_bus_release_module(module_node_t *mod);
 void esp_bus_report_error(const char *pattern, esp_err_t err, const char *msg);
 
 // Processing

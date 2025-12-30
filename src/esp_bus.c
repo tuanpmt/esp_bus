@@ -14,6 +14,53 @@ static const char *TAG = "esp_bus";
 esp_bus_state_t g_bus;
 
 // ============================================================================
+// Refcount helpers
+// ============================================================================
+static void remove_module_node(module_node_t *target) {
+    module_node_t *prev = NULL;
+    module_node_t *node;
+    SLIST_FOREACH(node, &g_bus.modules, next) {
+        if (node == target) break;
+        prev = node;
+    }
+    if (!node) return;
+    if (prev) {
+        SLIST_REMOVE_AFTER(prev, next);
+    } else {
+        SLIST_REMOVE_HEAD(&g_bus.modules, next);
+    }
+    free(node);
+}
+
+module_node_t *esp_bus_acquire_module(const char *name) {
+    if (!g_bus.initialized || !name) return NULL;
+    xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
+    module_node_t *node;
+    SLIST_FOREACH(node, &g_bus.modules, next) {
+        if (node->pending_delete) continue;
+        if (strcmp(node->name, name) == 0) {
+            node->refcnt++;
+            xSemaphoreGive(g_bus.mutex);
+            return node;
+        }
+    }
+    xSemaphoreGive(g_bus.mutex);
+    return NULL;
+}
+
+void esp_bus_release_module(module_node_t *mod) {
+    if (!mod) return;
+    xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
+    if (mod->refcnt > 0) mod->refcnt--;
+    if (mod->pending_delete && mod->refcnt == 0) {
+        remove_module_node(mod);
+        xSemaphoreGive(g_bus.mutex);
+        return;
+    }
+    xSemaphoreGive(g_bus.mutex);
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -26,6 +73,11 @@ bool esp_bus_match_pattern(const char *pattern, const char *target) {
     const char *t = target;
     
     while (*p && *t) {
+        if (*p == '?') {
+            p++;
+            t++;
+            continue;
+        }
         if (*p == '*') {
             p++;
             if (*p == '\0') return true;
@@ -53,8 +105,8 @@ bool esp_bus_parse_pattern(const char *pattern, char *module, char *action, char
         if (len >= ESP_BUS_NAME_MAX) return false;
         strncpy(module, pattern, len);
         module[len] = '\0';
-        strncpy(action, dot + 1, ESP_BUS_NAME_MAX - 1);
-        action[ESP_BUS_NAME_MAX - 1] = '\0';
+        strncpy(action, dot + 1, ESP_BUS_PATTERN_MAX - 1);
+        action[ESP_BUS_PATTERN_MAX - 1] = '\0';
         *sep = '.';
         return true;
     }
@@ -64,8 +116,8 @@ bool esp_bus_parse_pattern(const char *pattern, char *module, char *action, char
         if (len >= ESP_BUS_NAME_MAX) return false;
         strncpy(module, pattern, len);
         module[len] = '\0';
-        strncpy(action, colon + 1, ESP_BUS_NAME_MAX - 1);
-        action[ESP_BUS_NAME_MAX - 1] = '\0';
+        strncpy(action, colon + 1, ESP_BUS_PATTERN_MAX - 1);
+        action[ESP_BUS_PATTERN_MAX - 1] = '\0';
         *sep = ':';
         return true;
     }
@@ -78,13 +130,8 @@ bool esp_bus_parse_pattern(const char *pattern, char *module, char *action, char
 }
 
 module_node_t *esp_bus_find_module(const char *name) {
-    module_node_t *node;
-    SLIST_FOREACH(node, &g_bus.modules, next) {
-        if (strcmp(node->name, name) == 0) {
-            return node;
-        }
-    }
-    return NULL;
+    // Deprecated: kept for backward compatibility inside this file
+    return esp_bus_acquire_module(name);
 }
 
 void esp_bus_report_error(const char *pattern, esp_err_t err, const char *msg) {
@@ -269,7 +316,9 @@ esp_err_t esp_bus_reg(const esp_bus_module_t *module) {
     
     xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
     
-    if (esp_bus_find_module(module->name)) {
+    module_node_t *existing = esp_bus_find_module(module->name);
+    if (existing) {
+        esp_bus_release_module(existing);
         xSemaphoreGive(g_bus.mutex);
         ESP_LOGE(TAG, "Module '%s' already registered", module->name);
         return ESP_ERR_INVALID_STATE;
@@ -302,13 +351,28 @@ esp_err_t esp_bus_unreg(const char *name) {
     
     xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
     
-    module_node_t *mod = esp_bus_find_module(name);
+    module_node_t *mod;
+    module_node_t *prev = NULL;
+    SLIST_FOREACH(mod, &g_bus.modules, next) {
+        if (strcmp(mod->name, name) == 0 && !mod->pending_delete) break;
+        prev = mod;
+    }
     if (!mod) {
         xSemaphoreGive(g_bus.mutex);
         return ESP_ERR_NOT_FOUND;
     }
     
-    SLIST_REMOVE(&g_bus.modules, mod, module_node, next);
+    if (mod->refcnt > 0) {
+        mod->pending_delete = true;
+        xSemaphoreGive(g_bus.mutex);
+        return ESP_OK;
+    }
+    
+    if (prev) {
+        SLIST_REMOVE_AFTER(prev, next);
+    } else {
+        SLIST_REMOVE_HEAD(&g_bus.modules, next);
+    }
     free(mod);
     xSemaphoreGive(g_bus.mutex);
     
@@ -322,19 +386,17 @@ esp_err_t esp_bus_unreg(const char *name) {
 
 bool esp_bus_exists(const char *module) {
     if (!g_bus.initialized || !module) return false;
-    xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
-    bool exists = (esp_bus_find_module(module) != NULL);
-    xSemaphoreGive(g_bus.mutex);
+    module_node_t *mod = esp_bus_acquire_module(module);
+    bool exists = (mod != NULL);
+    esp_bus_release_module(mod);
     return exists;
 }
 
 bool esp_bus_has_action(const char *module, const char *action) {
     if (!g_bus.initialized || !module || !action) return false;
     
-    xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
-    module_node_t *mod = esp_bus_find_module(module);
     bool found = false;
-    
+    module_node_t *mod = esp_bus_acquire_module(module);
     if (mod && mod->actions) {
         for (size_t i = 0; i < mod->action_cnt; i++) {
             if (strcmp(mod->actions[i].name, action) == 0) {
@@ -343,17 +405,15 @@ bool esp_bus_has_action(const char *module, const char *action) {
             }
         }
     }
-    xSemaphoreGive(g_bus.mutex);
+    esp_bus_release_module(mod);
     return found;
 }
 
 bool esp_bus_has_event(const char *module, const char *event) {
     if (!g_bus.initialized || !module || !event) return false;
     
-    xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
-    module_node_t *mod = esp_bus_find_module(module);
     bool found = false;
-    
+    module_node_t *mod = esp_bus_acquire_module(module);
     if (mod && mod->events) {
         for (size_t i = 0; i < mod->event_cnt; i++) {
             if (strcmp(mod->events[i].name, event) == 0) {
@@ -362,7 +422,7 @@ bool esp_bus_has_event(const char *module, const char *event) {
             }
         }
     }
-    xSemaphoreGive(g_bus.mutex);
+    esp_bus_release_module(mod);
     return found;
 }
 
