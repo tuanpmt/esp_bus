@@ -1,6 +1,6 @@
 # ESP Bus Component Manifest
 
-version: "1.0.2"
+version: "1.0.3"
 description: "Lightweight event-driven message bus for ESP-IDF with string-based routing, pattern matching, and zero-allocation design"
 
 url: "https://github.com/tuanpmt/esp_bus"

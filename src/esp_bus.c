@@ -313,12 +313,19 @@ esp_err_t esp_bus_deinit(void) {
 
 esp_err_t esp_bus_reg(const esp_bus_module_t *module) {
     if (!g_bus.initialized || !module || !module->name) return ESP_ERR_INVALID_ARG;
-    
+
     xSemaphoreTake(g_bus.mutex, portMAX_DELAY);
-    
-    module_node_t *existing = esp_bus_find_module(module->name);
+
+    // Check if module already exists (inline to avoid deadlock with esp_bus_acquire_module)
+    module_node_t *existing = NULL;
+    module_node_t *iter;
+    SLIST_FOREACH(iter, &g_bus.modules, next) {
+        if (!iter->pending_delete && strcmp(iter->name, module->name) == 0) {
+            existing = iter;
+            break;
+        }
+    }
     if (existing) {
-        esp_bus_release_module(existing);
         xSemaphoreGive(g_bus.mutex);
         ESP_LOGE(TAG, "Module '%s' already registered", module->name);
         return ESP_ERR_INVALID_STATE;
