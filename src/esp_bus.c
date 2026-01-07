@@ -158,7 +158,7 @@ static void process_message(message_t *msg) {
             break;
         }
         case MSG_EVT: {
-            char module[ESP_BUS_NAME_MAX], event[ESP_BUS_NAME_MAX];
+            char module[ESP_BUS_NAME_MAX], event[ESP_BUS_PATTERN_MAX];
             char sep;
             if (esp_bus_parse_pattern(msg->pattern, module, event, &sep) && sep == ':') {
                 esp_bus_dispatch_event(module, event, msg->data, msg->len);
